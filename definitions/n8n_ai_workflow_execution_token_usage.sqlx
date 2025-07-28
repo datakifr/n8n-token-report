@@ -1,0 +1,93 @@
+-- Table: n8n_ai_workflow_execution_token_usage
+-- This table extracts and aggregates token usage metrics (prompt, completion, total)
+-- for each AI-related workflow execution, joining workflow data with execution_entity info.
+
+config {
+  type: "table",
+  schema: "n8n_workflow_reporting_staging",
+  name: "n8n_ai_workflow_execution_token_usage"
+
+}
+
+WITH
+
+  -- STEP 1 – explode raw JSON data into one row per LLM call 
+  raw AS (
+    SELECT
+      t.executionId, -- Execution identifier
+
+      --workflow-level metadata (same for all calls in an execution)
+      JSON_VALUE(t.workflowData, '$.id')        AS workflow_id,
+      JSON_VALUE(t.workflowData, '$.name')      AS workflow_name,
+      SAFE_CAST(JSON_VALUE(t.workflowData, '$.active') AS BOOL)  AS active,
+      JSON_VALUE(t.workflowData, '$.createdAt') AS created_at,
+      JSON_VALUE(t.workflowData, '$.updatedAt') AS updated_at,
+
+      OFFSET                                    AS element_index,   -- Position in the JSON array
+
+      -- token counts for each call
+      SAFE_CAST(JSON_VALUE(e, '$.completionTokens') AS INT64) AS completion_tokens,
+      SAFE_CAST(JSON_VALUE(e, '$.promptTokens')     AS INT64) AS prompt_tokens,
+      SAFE_CAST(JSON_VALUE(e, '$.totalTokens')      AS INT64) AS total_tokens
+    FROM
+      ${ref("n8n_execution_data_raw")} AS t,
+      UNNEST(JSON_EXTRACT_ARRAY(t.data))         AS e WITH OFFSET
+  ),
+
+  -- STEP 2 – assign a sequential item_id per execution for calls that have tokens
+  numbered AS (
+    SELECT
+      *,
+      COUNTIF(completion_tokens IS NOT NULL)
+        OVER (
+          PARTITION BY executionId
+          ORDER BY element_index
+          ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
+        ) + 1 AS item_id
+    FROM raw
+  ),
+
+  -- STEP 3 – filter out any rows without token metrics
+  filtered AS (
+    SELECT *
+    FROM numbered
+    WHERE completion_tokens IS NOT NULL
+       OR prompt_tokens     IS NOT NULL
+       OR total_tokens      IS NOT NULL
+  ),
+
+  -- STEP 4 – collapse duplicate rows (one JSON object may contain multiple metrics)
+  metrics AS (
+    SELECT
+      CONCAT(CAST(executionId AS STRING), '_', CAST(item_id AS STRING)) AS id,  -- Unique composite key
+      executionId,
+      item_id,
+
+      -- carry forward workflow metadata
+      ANY_VALUE(workflow_id)    AS workflow_id,
+      ANY_VALUE(workflow_name)  AS workflow_name,
+      ANY_VALUE(active)         AS active,
+      ANY_VALUE(created_at)     AS created_at,
+      ANY_VALUE(updated_at)     AS updated_at,
+
+      -- take the maximum seen for each metric (they should all be equal per row)
+      MAX(prompt_tokens)      AS prompt_tokens,
+      MAX(completion_tokens)  AS completion_tokens,
+      MAX(total_tokens)       AS total_tokens
+    FROM filtered
+    GROUP BY executionId, item_id
+  )
+
+-- STEP 5 – enrich with execution-entity to get timing and status details
+SELECT
+  m.*,
+  e.finished                    AS finished,       -- Whether the execution entity completed
+  e.startedAt                   AS started_at,     -- When the entity started
+  e.stoppedAt                   AS finished_at     -- When the entity finished
+FROM metrics AS m
+LEFT JOIN
+  ${ref("n8n_execution_entity_raw")} AS e
+  ON e.id = m.executionId        -- Join on execution identifier
+ORDER BY
+  m.executionId DESC,
+  m.item_id

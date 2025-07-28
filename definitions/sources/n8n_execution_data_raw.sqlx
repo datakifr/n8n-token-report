@@ -1,0 +1,6 @@
+config {
+  type: "declaration",
+  database: dataform.projectConfig.vars.project_id,
+  schema:   dataform.projectConfig.vars.ds_raw,
+  name:     "n8n_execution_data_raw"
+}

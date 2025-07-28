@@ -1,0 +1,106 @@
+-- definitions/n8n_ai_workflow_execution_llm_model.sqlx
+-- Table: n8n_ai_workflow_execution_llm_model
+-- Extracts which LLM model was used for each n8n AI workflow
+-- resolving numeric references and carrying forward the nearest non-null model name.
+
+config {
+  type: "table",                               
+  schema: "n8n_workflow_reporting_staging",
+  name: "n8n_ai_workflow_execution_llm_model"
+}
+
+WITH
+
+  -- STEP 1: Load raw JSON arrays of execution data
+  base AS (
+    SELECT
+      executionId,                             -- Unique execution identifier
+      JSON_EXTRACT_ARRAY(data) AS arr          -- Array of JSON objects, one per LLM call
+    FROM
+      ${ref("n8n_execution_data_raw")}
+  ),
+
+  -- STEP 2: Flatten each JSON element into its own row
+  flat AS (
+    SELECT
+      b.executionId,                           -- Carry forward execution ID
+      idx         AS element_index,            -- Position of this element in the array
+      JSON_EXTRACT_SCALAR(el, '$.model')            AS model_ref,         -- Raw model reference (ID or name)
+      SAFE_CAST(JSON_EXTRACT_SCALAR(el, '$.completionTokens') AS INT64) AS completion_tokens,  -- Tokens used
+      b.arr                                    AS full_array          -- Keep full array for lookups
+    FROM
+      base b
+    CROSS JOIN
+      UNNEST(b.arr) AS el WITH OFFSET idx
+  ),
+
+  -- STEP 3: Resolve numeric model_refs to actual model names
+  resolved AS (
+    SELECT
+      *,
+      CASE
+        WHEN model_ref IS NULL THEN NULL        -- No model specified
+        WHEN REGEXP_CONTAINS(model_ref, r'^\d+$') THEN
+          -- If numeric, treat as index into the original array
+          COALESCE(
+            JSON_EXTRACT_SCALAR(full_array[SAFE_OFFSET(CAST(model_ref AS INT64))], '$'),
+            REGEXP_EXTRACT(
+              CAST(full_array[SAFE_OFFSET(CAST(model_ref AS INT64))] AS STRING),
+              r'^"([^"]+)"$'
+            )
+          )
+        ELSE
+          model_ref                            -- Otherwise it's already a name
+      END AS model_name
+    FROM
+      flat
+  ),
+
+  -- STEP 4: Propagate the nearest non-null model name forward or backward
+  bidirectional AS (
+    SELECT
+      *,
+      LAST_VALUE(model_name IGNORE NULLS)
+        OVER (
+          PARTITION BY executionId
+          ORDER BY element_index
+          ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+        ) AS prev_model,                       -- Most recent non-null model up to this point
+      FIRST_VALUE(model_name IGNORE NULLS)
+        OVER (
+          PARTITION BY executionId
+          ORDER BY element_index
+          ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING
+        ) AS next_model                        -- Next non-null model after this point
+    FROM
+      resolved
+  ),
+
+  -- STEP 5: Number each valid call and select the resolved model
+  numbered AS (
+    SELECT
+      executionId,                             -- Execution identifier
+      COUNTIF(completion_tokens IS NOT NULL)
+        OVER (
+          PARTITION BY executionId
+          ORDER BY element_index
+          ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
+        ) + 1 AS item_id,                      -- 1-based index for each call with tokens
+      COALESCE(prev_model, next_model) AS model  -- Use previous model if available, else next
+    FROM
+      bidirectional
+    WHERE
+      completion_tokens IS NOT NULL            -- Only include rows representing actual usage
+  )
+
+-- STEP 6: Final output with stable composite key and ordering
+SELECT
+  CONCAT(CAST(executionId AS STRING), '_', CAST(item_id AS STRING)) AS id,  -- Unique composite key
+  executionId,                       -- Execution identifier
+  item_id,                           -- Call index within execution
+  model                              -- Resolved model name
+FROM
+  numbered
+ORDER BY
+  executionId,
+  item_id

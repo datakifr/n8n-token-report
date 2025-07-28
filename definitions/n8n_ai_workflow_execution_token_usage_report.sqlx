@@ -1,0 +1,72 @@
+-- definitions/n8n_ai_workflow_execution_token_usage_report.sqlx
+-- Table: n8n_ai_workflow_execution_token_usage_report
+-- Combines per-item token usage metrics and workflow metadata with corresponding LLM model and provider details for each workflow execution
+
+config {
+  type: "table",  
+  schema: "n8n_reporting",  
+  name: "n8n_ai_workflow_execution_token_usage_report",  
+  dependencies: [
+    "n8n_ai_workflow_execution_llm_model",  
+    "n8n_ai_workflow_execution_token_usage"  
+  ]
+}
+
+WITH
+
+  -- STEP 1: Base token usage data for each execution item
+  workflow_data AS (
+    SELECT
+      id,                -- Composite key: executionId + item_id
+      executionId,       -- Execution identifier
+      item_id,           -- Index of the call within the execution
+      workflow_name,     -- Name of the workflow
+      prompt_tokens,     -- Number of prompt tokens used
+      completion_tokens, -- Number of completion tokens used
+      total_tokens,      -- Total tokens used
+      started_at,        -- When the execution entity started
+      finished_at,       -- When the execution entity finished
+      active,            -- Workflow active flag
+      finished           -- Execution-entity finished flag
+    FROM ${ref("n8n_ai_workflow_execution_token_usage")}
+
+
+  ),
+
+  -- STEP 2: LLM model and provider metadata for each execution item
+  workflow_llm_details AS (
+    SELECT
+      we.id,             -- Composite key to join back to usage data
+      we.executionId,    
+      we.item_id,        
+      we.model,          -- Resolved model name
+      lml.provider       -- Provider for the model (e.g., OpenAI, Anthropic)
+    FROM ${ref("n8n_ai_workflow_execution_llm_model")} AS we
+    INNER JOIN
+      ${ref("model_list")} AS lml
+      ON lml.model = we.model  -- Match model name to provider list
+  )
+
+-- STEP 3: Final report joining token usage with model/provider metadata
+SELECT
+  wd.id,
+  wd.executionId,
+  wd.item_id,
+  wd.started_at,
+  wd.finished_at,
+  wd.active,
+  wd.workflow_name,
+  wld.model,          -- LLM model used
+  wld.provider,       -- LLM provider
+  wd.prompt_tokens,
+  wd.completion_tokens,
+  wd.total_tokens,
+  wd.finished
+FROM
+  workflow_data AS wd
+INNER JOIN
+  workflow_llm_details AS wld
+  ON wd.id = wld.id
+ORDER BY
+  wd.executionId,
+  wd.item_id

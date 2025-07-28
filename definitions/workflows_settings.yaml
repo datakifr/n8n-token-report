@@ -1,0 +1,9 @@
+defaultProject: <YOUR-PROJECT-ID>
+defaultLocation: EU
+defaultDataset: n8n_reporting
+defaultAssertionDataset: dataform_assertions
+dataformCoreVersion: 3.0.0
+vars:
+  project_id: <YOUR-PROJECT-ID>
+  ds_raw: <RAW_DATASET>      # BigQuery dataset containing the raw n8n `execution_entity` and `execution_data` tables
+  ds_staging: <STAGING_DATASET>  # BigQuery dataset for staging transformations of the raw n8n data
