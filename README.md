@@ -2,6 +2,7 @@
 
 This repository demonstrates how to build a reporting dashboard for **token usage by n8n AI workflows** using SQL transformations with Dataform and Google BigQuery.
 ![n8n Token Usage Dashboard](n8n_tokens_dash_1.png)
+
 ## Prerequisites
 
 This repository contains only the **Dataform files** that generate the reporting table, which is then connected to Looker Studio. You will need:
@@ -127,4 +128,4 @@ Contains the final table used by Looker Studio:
 | completion_tokens | INTEGER   |                                                                                                                |
 | total_tokens      | INTEGER   |                                                                                                                |
 | finished          | BOOLEAN   |                                                                                                                |
-# n8n-token-report
+
